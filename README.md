@@ -11,3 +11,13 @@ Information and test data for [jclab-oss/neon](https://github.com/jclab-oss/neon
 - `testing/version.yaml`: the Neon build (images and test sources) to test against the latest release of `testing/archive/upstream/`.
 - `.github/actions/compatibility-test`: the reusable action that runs the compatibility tests (`test_compatibility.py`) for a build, given as its images, against an archived release.
 - `.github/workflows/compatibility-test.yml`: runs it for `testing/version.yaml` on pull requests and comments the results.
+
+## ❤️ Support this project
+
+If you find this project useful, please consider sponsoring its development and maintenance.
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/jclab-oss)
+
+Your support helps fund ongoing maintenance, bug fixes, new features, and other open-source projects.
+
+👉 **[Sponsor jclab-oss on GitHub](https://github.com/sponsors/jclab-oss)**
