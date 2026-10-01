@@ -1,0 +1,12 @@
+# The upstream Neon release the compatibility snapshots next to this file were generated from, by the
+# `test-generator/upstream` branch of jclab-oss/neon. The images are the release's binaries.
+release: release-9129
+commit: 5340423416b46c85841904f42c93be9af145c643
+neon-image: ghcr.io/neondatabase/neon:release-9129@sha256:166022a72bf9983eba96d061d794f4740edbd4c3301e66202c1180acce9a323c
+compute-images:
+  v16: ghcr.io/neondatabase/compute-node-v16:release-compute-9073@sha256:01b5534a2402bf69ebf158a22a0cf43355604c9b7393f7d50a66ce9b02a5aa27
+  v17: ghcr.io/neondatabase/compute-node-v17:release-compute-9073@sha256:ed6a613231d7026b4df8b00563444b9f33745370a3b3f0a2183e723f460ba974
+build-tools-image: ghcr.io/neondatabase/build-tools:pinned-bookworm@sha256:07e617fce699ae4d2fd9b6c46ee2583340fbce4a98c4cedccf04f12d30e63a62
+generator:
+  commit: 02acf2bc83b7c57e7b49711ad25aac4bc8a92388
+  run: https://github.com/jclab-oss/neon/actions/runs/36874660338
