@@ -1,0 +1,144 @@
+name: Compatibility test
+
+# Tests the Neon build of testing/version.yaml against the latest release archived in testing/archive/upstream/
+# (see .github/actions/compatibility-test), and comments the results on the pull request.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      neon-repository: ${{ steps.plan.outputs.neon-repository }}
+      neon-ref: ${{ steps.plan.outputs.neon-ref }}
+      neon-image: ${{ steps.plan.outputs.neon-image }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Read testing/version.yaml
+        id: plan
+        run: |
+          yq -o=json testing/version.yaml > /tmp/version.json
+          {
+            echo "matrix=$(jq -c '[(.arches // ["x64", "arm64"])[] as $arch | .versions[] | {"pg-version": .name, "compute-image": .image, "arch": $arch}]' /tmp/version.json)"
+            for key in repository ref image; do
+              echo "neon-${key}=$(jq -r ".neon.${key}" /tmp/version.json)"
+            done
+          } | tee -a "${GITHUB_OUTPUT}"
+
+  test:
+    needs: plan
+    name: test (${{ matrix.pg-version }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: false
+
+      - name: Run the compatibility tests
+        id: test
+        uses: ./.github/actions/compatibility-test
+        with:
+          neon-image: ${{ needs.plan.outputs.neon-image }}
+          compute-image: ${{ matrix.compute-image }}
+          pg-version: ${{ matrix.pg-version }}
+          neon-repository: ${{ needs.plan.outputs.neon-repository }}
+          neon-ref: ${{ needs.plan.outputs.neon-ref }}
+          archive-path: .
+          title: ${{ matrix.pg-version }} ${{ matrix.arch }}
+          fail-on-error: false
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.test.outputs.report != ''
+        with:
+          name: report-${{ matrix.pg-version }}-${{ matrix.arch }}
+          path: ${{ steps.test.outputs.report }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.test.outputs.outcome != 'success'
+        with:
+          name: test-output-${{ matrix.pg-version }}-${{ matrix.arch }}
+          path: ${{ steps.test.outputs.test-output }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Fail if the tests failed
+        if: steps.test.outputs.outcome != 'success'
+        run: exit 1
+
+  comment:
+    needs: [ plan, test ]
+    # Not for pull requests from forks, whose token can't comment
+    if: >-
+      !cancelled() && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: report-*
+          path: /tmp/reports
+
+      - name: Write the comment
+        env:
+          RESULT: ${{ needs.test.result }}
+          NEON_REPOSITORY: ${{ needs.plan.outputs.neon-repository }}
+          NEON_REF: ${{ needs.plan.outputs.neon-ref }}
+          NEON_IMAGE: ${{ needs.plan.outputs.neon-image }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "${RESULT}" = "success" ]; then STATUS="✅ passed"; else STATUS="❌ ${RESULT}"; fi
+          {
+            echo "<!-- compatibility-test -->"
+            echo "### Compatibility test: ${STATUS}"
+            echo
+            echo "[\`${NEON_REPOSITORY}@${NEON_REF}\`](https://github.com/${NEON_REPOSITORY}/tree/${NEON_REF}) (\`${NEON_IMAGE}\`) against the latest release of \`testing/archive/upstream/\`, [run](${RUN_URL}) for ${GITHUB_SHA::7}."
+            echo
+            for report in /tmp/reports/*/report.md; do
+              [ -e "${report}" ] || continue
+              cat "${report}"
+              echo
+            done
+          } > /tmp/comment.md
+          cat /tmp/comment.md
+
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/comment.md', 'utf8');
+            const marker = '<!-- compatibility-test -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const previous = comments.find(c => c.user.type === 'Bot' && c.body.startsWith(marker));
+            if (previous) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

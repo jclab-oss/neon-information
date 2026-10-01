@@ -1,0 +1,264 @@
+name: "Neon compatibility test"
+description: >
+  Runs Neon's compatibility tests (test_compatibility.py) for a Neon build, given as its published images, against the
+  compatibility data of a previous release archived in this repository: `testing/archive/<archive>/<release>/` holds
+  the release's compatibility snapshots (`compatibility-snapshot-<X64|ARM64>-release-pg<version>.tar.zst`, in Git LFS)
+  and `info.yaml`, naming the images of its binaries.
+  The tests are run in the build-tools image, with the binaries of the images, which may be built without the `testing`
+  feature (see without_testing_feature.py). Needs Docker, git-lfs, yq and Python 3 on the runner. Writes a Markdown
+  report (also added to the job summary).
+
+inputs:
+  neon-image:
+    description: "The neon image (storage binaries and Postgres installations) of the build to test"
+    required: true
+  compute-image:
+    description: "The compute image of the build for `pg-version` (for compute_ctl)"
+    required: true
+  pg-version:
+    description: "The Postgres version to test: `v16`, `v17`"
+    required: true
+  neon-ref:
+    description: "The commit, branch or tag of `neon-repository` the images were built from, whose tests to run"
+    required: true
+  neon-repository:
+    description: "The repository of the tests"
+    default: "jclab-oss/neon"
+  archive:
+    description: "The archive (directory of `testing/archive/`) to test against"
+    default: "upstream"
+  release:
+    description: "The release (directory of the archive) to test against, its latest (by version sort) if empty"
+    default: ""
+  archive-path:
+    description: >
+      A checkout of this repository (without the LFS files) to take the archive from, `archive-repository` at
+      `archive-ref` is checked out if empty
+    default: ""
+  archive-repository:
+    description: "The repository of the archive, if `archive-path` is empty"
+    default: "jclab-oss/neon-information"
+  archive-ref:
+    description: "The ref of `archive-repository`, its default branch if empty"
+    default: ""
+  build-tools-image:
+    description: "The image to run the tests in"
+    default: "ghcr.io/neondatabase/build-tools:pinned-bookworm"
+  pytest-args:
+    description: "The tests to run (pytest arguments, as a shell word list)"
+    # test_historic_storage_formats needs datasets of Neon's S3 bucket
+    default: 'test_runner/regress/test_compatibility.py -k "not test_historic_storage_formats"'
+  title:
+    description: "The heading of the report, `<pg-version> <arch>` if empty"
+    default: ""
+  fail-on-error:
+    description: "Whether to fail if the tests fail (otherwise, see the `outcome` output)"
+    default: "true"
+
+outputs:
+  outcome:
+    description: "`success` if the tests passed, `failure` otherwise"
+    value: ${{ steps.test.outputs.outcome || 'failure' }}
+  report:
+    description: "The path of the Markdown report"
+    value: ${{ steps.report.outputs.report }}
+  release:
+    description: "The release tested against"
+    value: ${{ steps.archive.outputs.release }}
+  test-output:
+    description: "The path of an archive (`.tar.gz`) of the tests' output (logs and repositories)"
+    value: ${{ steps.prepare.outputs.dir }}/test_output.tar.gz
+
+runs:
+  using: "composite"
+  steps:
+    - name: Prepare
+      id: prepare
+      shell: bash -euo pipefail {0}
+      env:
+        DIR: ${{ runner.temp }}/compatibility-test
+      run: |
+        rm -rf "${DIR}"
+        mkdir -p "${DIR}"
+        echo "dir=${DIR}" >> "${GITHUB_OUTPUT}"
+
+    - name: Check out the archive
+      if: inputs.archive-path == ''
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: ${{ inputs.archive-repository }}
+        ref: ${{ inputs.archive-ref }}
+        path: .compatibility-test/archive
+        sparse-checkout: testing/archive
+        lfs: false
+
+    - name: Find the compatibility data
+      id: archive
+      shell: bash -euo pipefail {0}
+      env:
+        REPO: ${{ inputs.archive-path || '.compatibility-test/archive' }}
+        ARCHIVE: ${{ inputs.archive }}
+        RELEASE: ${{ inputs.release }}
+        PG_VERSION: ${{ inputs.pg-version }}
+      run: |
+        cd "${REPO}"
+        if [ -z "${RELEASE}" ]; then
+          RELEASE=$(find "testing/archive/${ARCHIVE}" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" | sort -V | tail -n 1)
+        fi
+        DATA="testing/archive/${ARCHIVE}/${RELEASE}"
+        SNAPSHOT="${DATA}/compatibility-snapshot-${RUNNER_ARCH}-release-pg${PG_VERSION}.tar.zst"
+        if [ ! -e "${SNAPSHOT}" ]; then
+          echo "::error::There is no ${SNAPSHOT}"
+          exit 1
+        fi
+        OID=$(git lfs ls-files --long --include="${SNAPSHOT}" | awk '{ print $1 }')
+        echo "Testing against ${DATA} (snapshot ${OID})"
+        {
+          echo "repo=$(pwd)"
+          echo "release=${RELEASE}"
+          echo "info=$(pwd)/${DATA}/info.yaml"
+          echo "snapshot=${SNAPSHOT}"
+          echo "oid=${OID}"
+        } >> "${GITHUB_OUTPUT}"
+
+    # Saves the LFS bandwidth: the snapshots of a release never change
+    - name: Cache the snapshot
+      uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: ${{ steps.archive.outputs.repo }}/.git/lfs/objects
+        key: compatibility-snapshot-lfs-${{ steps.archive.outputs.oid }}
+
+    - name: Fetch the snapshot
+      shell: bash -euo pipefail {0}
+      env:
+        REPO: ${{ steps.archive.outputs.repo }}
+        SNAPSHOT: ${{ steps.archive.outputs.snapshot }}
+      run: |
+        cd "${REPO}"
+        git lfs pull --include="${SNAPSHOT}"
+        ls -l "${SNAPSHOT}"
+
+    - name: Check out the tests
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: ${{ inputs.neon-repository }}
+        ref: ${{ inputs.neon-ref }}
+        path: .compatibility-test/neon
+        persist-credentials: false
+
+    - name: Extract the binaries
+      shell: bash -euo pipefail {0}
+      env:
+        DIR: ${{ steps.prepare.outputs.dir }}
+        NEON_IMAGE: ${{ inputs.neon-image }}
+        COMPUTE_IMAGE: ${{ inputs.compute-image }}
+        PG_VERSION: ${{ inputs.pg-version }}
+        INFO: ${{ steps.archive.outputs.info }}
+      run: |
+        # extract <neon image> <compute image> <target>: the layout of Build and Test's neon artifacts
+        extract() {
+          echo "Extracting $1 and $2 to $3"
+          mkdir -p "$3/bin" "$3/pg_install"
+          docker pull --quiet "$1"
+          local id
+          id=$(docker create "$1")
+          for bin in neon_local pageserver pagectl safekeeper storage_broker storage_controller storage_scrubber endpoint_storage; do
+            docker cp "${id}:/usr/local/bin/${bin}" "$3/bin/"
+          done
+          for v in v14 v15 v16 v17; do
+            docker cp "${id}:/usr/local/${v}" "$3/pg_install/${v}"
+          done
+          docker rm "${id}"
+          # compute_ctl, which `neon_local endpoint start` runs, is only in the compute images
+          docker pull --quiet "$2"
+          id=$(docker create "$2")
+          docker cp "${id}:/usr/local/bin/compute_ctl" "$3/bin/"
+          docker rm "${id}"
+          "$3/bin/pageserver" --version
+        }
+
+        extract "${NEON_IMAGE}" "${COMPUTE_IMAGE}" "${DIR}/neon"
+        extract "$(yq '.["neon-image"]' "${INFO}")" "$(yq ".[\"compute-images\"].${PG_VERSION}" "${INFO}")" "${DIR}/neon-previous"
+
+    - name: Run the tests
+      id: test
+      shell: bash -euo pipefail {0}
+      env:
+        DIR: ${{ steps.prepare.outputs.dir }}
+        SNAPSHOT: ${{ steps.archive.outputs.repo }}/${{ steps.archive.outputs.snapshot }}
+        BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
+        PG_VERSION: ${{ inputs.pg-version }}
+        PYTEST_ARGS: ${{ inputs.pytest-args }}
+      run: |
+        # The build-tools image runs as `nonroot` (uid 1000)
+        mkdir -p "${DIR}/test_output"
+        chmod -R a+rwX .compatibility-test/neon "${DIR}"
+
+        docker pull --quiet "${BUILD_TOOLS_IMAGE}"
+        # Host networking: compute_ctl listens on `[::]`, which needs IPv6
+        if [ -d /proc/sys/net/ipv6 ]; then
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0 net.ipv6.conf.lo.disable_ipv6=0
+        else
+          echo "::warning::The kernel has no IPv6"
+        fi
+        set +e
+        docker run --rm --network host \
+          --volume "$(pwd)/.compatibility-test/neon:/src" --workdir /src \
+          --volume "${DIR}:/compat" \
+          --volume "${SNAPSHOT}:/compat-data/snapshot.tar.zst:ro" \
+          --volume "${GITHUB_ACTION_PATH}:/compat-plugin:ro" \
+          --env CI=true \
+          --env PYTHONDONTWRITEBYTECODE=1 \
+          --env PYTHONPATH=/compat-plugin \
+          --env NEON_BIN=/compat/neon/bin \
+          --env POSTGRES_DISTRIB_DIR=/compat/neon/pg_install \
+          --env TEST_OUTPUT=/compat/test_output \
+          --env BUILD_TYPE=release \
+          --env DEFAULT_PG_VERSION="${PG_VERSION#v}" \
+          --env CHECK_ONDISK_DATA_COMPATIBILITY=nonempty \
+          --env COMPATIBILITY_NEON_BIN=/compat/neon-previous/bin \
+          --env COMPATIBILITY_POSTGRES_DISTRIB_DIR=/compat/neon-previous/pg_install \
+          --env COMPATIBILITY_SNAPSHOT_DIR="/compat/compatibility_snapshot_pg${PG_VERSION}" \
+          --env PYTEST_ARGS \
+          "${BUILD_TOOLS_IMAGE}" \
+          bash -euxo pipefail -c '
+            # Extracted here, as the snapshot has directories only their owner may read
+            mkdir -p "${COMPATIBILITY_SNAPSHOT_DIR}"
+            tar -xf /compat-data/snapshot.tar.zst -C "${COMPATIBILITY_SNAPSHOT_DIR}"
+            ./scripts/pysync
+            eval "./scripts/pytest ${PYTEST_ARGS}" -p without_testing_feature -p no:cacheprovider \
+              --junitxml=/compat/junit.xml --tb=short --verbose -rA
+          '
+        rc=$?
+        set -e
+        if [ "${rc}" -eq 0 ]; then
+          echo "outcome=success" >> "${GITHUB_OUTPUT}"
+        else
+          echo "outcome=failure" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Write the report
+      id: report
+      if: always() && steps.prepare.outputs.dir != ''
+      shell: bash -euo pipefail {0}
+      env:
+        DIR: ${{ steps.prepare.outputs.dir }}
+        BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
+        TITLE: ${{ inputs.title || format('{0} {1}', inputs.pg-version, runner.arch) }}
+        RELEASE: ${{ steps.archive.outputs.release }}
+      run: |
+        # Packed for the runner's user, e.g. to upload it (pg_dynshmem links to /dev/shm)
+        if [ -d "${DIR}/test_output" ]; then
+          docker run --rm --user root --volume "${DIR}:/compat" "${BUILD_TOOLS_IMAGE}" \
+            tar -C /compat -czf /compat/test_output.tar.gz --exclude=pg_dynshmem test_output || true
+        fi
+        python3 "${GITHUB_ACTION_PATH}/report.py" "${DIR}/junit.xml" "${TITLE} (against ${RELEASE:-?})" > "${DIR}/report.md"
+        cat "${DIR}/report.md" >> "${GITHUB_STEP_SUMMARY}"
+        echo "report=${DIR}/report.md" >> "${GITHUB_OUTPUT}"
+
+    - name: Fail if the tests failed
+      if: inputs.fail-on-error == 'true' && steps.test.outputs.outcome != 'success'
+      shell: bash -euo pipefail {0}
+      run: |
+        echo "::error::The compatibility tests failed"
+        exit 1

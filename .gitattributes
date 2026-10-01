@@ -1,0 +1,2 @@
+# Compatibility snapshots of archived releases (testing/archive/<archive>/<release>/)
+testing/archive/**/*.tar.zst filter=lfs diff=lfs merge=lfs -text

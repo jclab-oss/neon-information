@@ -1,0 +1,69 @@
+name: Import compatibility snapshots
+
+# Imports the artifacts of a `Generate compatibility snapshots` run (jclab-oss/neon's `test-generator/*` branches) to
+# testing/archive/<archive>/<release>/ (the snapshots in Git LFS), on a new `archive/<archive>-<release>` branch to
+# open a pull request from, which runs the compatibility test against them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: "The ID of the `Generate compatibility snapshots` run"
+        required: true
+      repository:
+        description: "The repository of the run"
+        default: "jclab-oss/neon"
+      archive:
+        description: "The archive (directory of testing/archive/) to import to"
+        default: "upstream"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: false
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          repository: ${{ inputs.repository }}
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+          path: /tmp/import
+
+      - name: Commit the snapshots
+        env:
+          ARCHIVE: ${{ inputs.archive }}
+          RUN_URL: ${{ github.server_url }}/${{ inputs.repository }}/actions/runs/${{ inputs.run-id }}
+        run: |
+          ls -lR /tmp/import
+          RELEASE=$(yq '.release' /tmp/import/upstream-info/info.yaml)
+          DIR="testing/archive/${ARCHIVE}/${RELEASE}"
+          BRANCH="archive/${ARCHIVE}-${RELEASE}"
+
+          mkdir -p "${DIR}"
+          cp /tmp/import/upstream-info/info.yaml "${DIR}/"
+          cp /tmp/import/compatibility-snapshot-*/*.tar.zst "${DIR}/"
+
+          git lfs install --local
+          git checkout -b "${BRANCH}"
+          git add "${DIR}"
+          # The snapshots must be in LFS (see .gitattributes)
+          git lfs ls-files
+          for f in "${DIR}"/*.tar.zst; do
+            git lfs ls-files --name-only | grep -qxF "${f}" || { echo "::error::${f} is not in LFS"; exit 1; }
+          done
+
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "Import the compatibility snapshots of ${ARCHIVE} ${RELEASE}" -m "From ${RUN_URL}"
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          echo "Pushed [\`${BRANCH}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${BRANCH}?expand=1), open a pull request to test against it" >> "${GITHUB_STEP_SUMMARY}"

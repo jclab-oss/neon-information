@@ -1,0 +1,18 @@
+# The Neon build tested for compatibility with the latest release archived in testing/archive/upstream/
+# (.github/workflows/compatibility-test.yml, with .github/actions/compatibility-test).
+neon:
+  # The tests (test_runner) to run: the source of the images below
+  repository: jclab-oss/neon
+  ref: release-8480
+  # The storage binaries and Postgres installations
+  image: ghcr.io/jclab-oss/neon:release-8480
+# The architectures to test on (`x64`, `arm64`)
+arches:
+  - x64
+  - arm64
+# The Postgres versions to test, with the compute image of each (for compute_ctl)
+versions:
+  - name: v16
+    image: ghcr.io/jclab-oss/compute-node-v16:release-compute-8480
+  - name: v17
+    image: ghcr.io/jclab-oss/compute-node-v17:release-compute-8480
