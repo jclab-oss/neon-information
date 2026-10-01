@@ -195,6 +195,8 @@ runs:
         chmod -R a+rwX .compatibility-test/neon "${DIR}"
 
         docker pull --quiet "${BUILD_TOOLS_IMAGE}"
+        # The Postgres installations are built in /home/nonroot/pg_install (build-tools' user's home), which is their
+        # RUNPATH (e.g. neon.so's, for libpq): the tested one is mounted there, the previous one uses its libraries.
         # Host networking: compute_ctl listens on `[::]`, which needs IPv6
         if [ -d /proc/sys/net/ipv6 ]; then
           sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0 net.ipv6.conf.lo.disable_ipv6=0
@@ -205,13 +207,14 @@ runs:
         docker run --rm --network host \
           --volume "$(pwd)/.compatibility-test/neon:/src" --workdir /src \
           --volume "${DIR}:/compat" \
+          --volume "${DIR}/neon/pg_install:/home/nonroot/pg_install:ro" \
           --volume "${SNAPSHOT}:/compat-data/snapshot.tar.zst:ro" \
           --volume "${GITHUB_ACTION_PATH}:/compat-plugin:ro" \
           --env CI=true \
           --env PYTHONDONTWRITEBYTECODE=1 \
           --env PYTHONPATH=/compat-plugin \
           --env NEON_BIN=/compat/neon/bin \
-          --env POSTGRES_DISTRIB_DIR=/compat/neon/pg_install \
+          --env POSTGRES_DISTRIB_DIR=/home/nonroot/pg_install \
           --env TEST_OUTPUT=/compat/test_output \
           --env BUILD_TYPE=release \
           --env DEFAULT_PG_VERSION="${PG_VERSION#v}" \
