@@ -1,0 +1,108 @@
+name: "Set up a Neon build for tests"
+description: >
+  Prepares a Neon build, given as its published images, to run Neon's Python tests (test_runner) with:
+  extracts the binaries of the images (and optionally of a previous build's) in the layout of Build and Test's neon
+  artifacts, and checks out the tests. Then `run.sh` runs a script in a build-tools-based image with them, and
+  `pack-output.sh` archives the tests' output.
+  The binaries may be built without the `testing` feature: pass `-p without_testing_feature` to pytest (see
+  without_testing_feature.py). Needs Docker on the runner.
+
+inputs:
+  neon-image:
+    description: "The neon image (storage binaries and Postgres installations) of the build"
+    required: true
+  compute-image:
+    description: "The compute image of the build (for compute_ctl)"
+    required: true
+  neon-ref:
+    description: "The commit, branch or tag of `neon-repository` the images were built from, whose tests to run"
+    required: true
+  neon-repository:
+    description: "The repository of the tests"
+    default: "jclab-oss/neon"
+  previous-neon-image:
+    description: "The neon image of a previous build to extract too (to `neon-previous`), none if empty"
+    default: ""
+  previous-compute-image:
+    description: "The compute image of the previous build"
+    default: ""
+
+outputs:
+  dir:
+    description: >
+      The directory of the binaries (`neon/{bin,pg_install}`, `neon-previous/...`) and of the tests' output
+      (`test_output`), for `run.sh` (NEON_TEST_DIR)
+    value: ${{ steps.prepare.outputs.dir }}
+  src:
+    description: "The checkout of the tests, for `run.sh` (NEON_TEST_SRC)"
+    value: ${{ steps.prepare.outputs.src }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Prepare
+      id: prepare
+      shell: bash -euo pipefail {0}
+      env:
+        DIR: ${{ runner.temp }}/neon-test
+      run: |
+        rm -rf "${DIR}"
+        mkdir -p "${DIR}"
+        {
+          echo "dir=${DIR}"
+          echo "src=$(pwd)/.neon-test/neon"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Check out the tests
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: ${{ inputs.neon-repository }}
+        ref: ${{ inputs.neon-ref }}
+        path: .neon-test/neon
+        persist-credentials: false
+
+    - name: Extract the binaries
+      shell: bash -euo pipefail {0}
+      env:
+        DIR: ${{ steps.prepare.outputs.dir }}
+        NEON_IMAGE: ${{ inputs.neon-image }}
+        COMPUTE_IMAGE: ${{ inputs.compute-image }}
+        PREVIOUS_NEON_IMAGE: ${{ inputs.previous-neon-image }}
+        PREVIOUS_COMPUTE_IMAGE: ${{ inputs.previous-compute-image }}
+      run: |
+        # extract <neon image> <compute image> <target>: the layout of Build and Test's neon artifacts
+        extract() {
+          echo "Extracting $1 and $2 to $3"
+          mkdir -p "$3/bin" "$3/pg_install"
+          docker pull --quiet "$1"
+          local id
+          id=$(docker create "$1")
+          for bin in neon_local pageserver pagectl safekeeper storage_broker storage_controller storage_scrubber endpoint_storage; do
+            docker cp "${id}:/usr/local/bin/${bin}" "$3/bin/"
+          done
+          for v in v14 v15 v16 v17; do
+            docker cp "${id}:/usr/local/${v}" "$3/pg_install/${v}"
+          done
+          docker rm "${id}"
+          # compute_ctl, which `neon_local endpoint start` runs, is only in the compute images
+          docker pull --quiet "$2"
+          id=$(docker create "$2")
+          docker cp "${id}:/usr/local/bin/compute_ctl" "$3/bin/"
+          docker rm "${id}"
+          "$3/bin/pageserver" --version
+        }
+
+        extract "${NEON_IMAGE}" "${COMPUTE_IMAGE}" "${DIR}/neon"
+        if [ -n "${PREVIOUS_NEON_IMAGE}" ]; then
+          extract "${PREVIOUS_NEON_IMAGE}" "${PREVIOUS_COMPUTE_IMAGE}" "${DIR}/neon-previous"
+        fi
+
+    # compute_ctl listens on `[::]`, which needs IPv6 (run.sh uses the host's network)
+    - name: Enable IPv6
+      shell: bash -euo pipefail {0}
+      run: |
+        if [ -d /proc/sys/net/ipv6 ]; then
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0 net.ipv6.conf.lo.disable_ipv6=0
+        else
+          echo "::warning::The kernel has no IPv6"
+        fi

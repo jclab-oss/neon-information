@@ -1,0 +1,147 @@
+name: Issue
+
+# Tests a Neon build requested in an issue (.github/workflows/neon-test.yml), e.g. a pull request's build of
+# jclab-oss/neon: an issue opened with the "Neon test" form (titled `[neon-test] ...`), or a comment on an issue
+# starting with `/neon-test` (see .github/scripts/neon-test-request.py for the request). Only users with write access
+# to this repository may request tests. The results are commented on the issue.
+
+on:
+  issues:
+    types: [ opened ]
+  issue_comment:
+    types: [ created ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}-${{ github.event.comment.id || 'issue' }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  request:
+    if: >-
+      (github.event_name == 'issues' && startsWith(github.event.issue.title, '[neon-test]'))
+      || (github.event_name == 'issue_comment' && !github.event.issue.pull_request
+          && startsWith(github.event.comment.body, '/neon-test'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      valid: ${{ steps.request.outputs.valid }}
+      marker: ${{ steps.marker.outputs.marker }}
+      neon-ref: ${{ steps.request.outputs.neon-ref }}
+      neon-image: ${{ steps.request.outputs.neon-image }}
+      compute-images: ${{ steps.request.outputs.compute-images }}
+      arches: ${{ steps.request.outputs.arches }}
+      tests: ${{ steps.request.outputs.tests }}
+      duration: ${{ steps.request.outputs.duration }}
+      title: ${{ steps.request.outputs.title }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: false
+          persist-credentials: false
+
+      # One results comment for each request
+      - name: Identify the request
+        id: marker
+        env:
+          REQUEST_ID: ${{ github.event.comment.id || 'issue' }}
+        run: echo "marker=<!-- neon-test:${REQUEST_ID} -->" >> "${GITHUB_OUTPUT}"
+
+      - name: Check the requester's permission
+        id: permission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTER: ${{ github.event.sender.login }}
+        run: |
+          permission=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${REQUESTER}/permission" --jq .permission || echo none)
+          echo "${REQUESTER} has the ${permission} permission"
+          case "${permission}" in
+            admin|maintain|write) echo "allowed=true" >> "${GITHUB_OUTPUT}" ;;
+            *) echo "allowed=false" >> "${GITHUB_OUTPUT}" ;;
+          esac
+
+      # The request is untrusted: it only reaches the script through the environment
+      - name: Read the request
+        id: request
+        if: steps.permission.outputs.allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST: ${{ github.event.comment.body || github.event.issue.body }}
+        run: |
+          export DEFAULTS
+          DEFAULTS=$(yq -o=json testing/version.yaml)
+          python3 .github/scripts/neon-test-request.py
+
+      - name: Write the answer
+        env:
+          ALLOWED: ${{ steps.permission.outputs.allowed }}
+          VALID: ${{ steps.request.outputs.valid }}
+          ERROR: ${{ steps.request.outputs.error }}
+          TITLE: ${{ steps.request.outputs.title }}
+          REQUESTER: ${{ github.event.sender.login }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "${ALLOWED}" != "true" ]; then
+            echo "@${REQUESTER}: only users with write access to this repository can request tests." > /tmp/answer.md
+          elif [ "${VALID}" != "true" ]; then
+            echo "❌ Invalid request: ${ERROR}" > /tmp/answer.md
+          else
+            echo "⏳ Testing ${TITLE}: [run](${RUN_URL})." > /tmp/answer.md
+          fi
+
+      - uses: ./.github/actions/comment
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          marker: ${{ steps.marker.outputs.marker }}
+          body-file: /tmp/answer.md
+
+  test:
+    needs: request
+    if: needs.request.outputs.valid == 'true'
+    uses: ./.github/workflows/neon-test.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      neon-ref: ${{ needs.request.outputs.neon-ref }}
+      neon-image: ${{ needs.request.outputs.neon-image }}
+      compute-images: ${{ needs.request.outputs.compute-images }}
+      arches: ${{ needs.request.outputs.arches }}
+      tests: ${{ needs.request.outputs.tests }}
+      workload-duration: ${{ needs.request.outputs.duration }}
+      title: ${{ needs.request.outputs.title }}
+
+  comment:
+    needs: [ request, test ]
+    if: "!cancelled() && needs.request.outputs.valid == 'true'"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: false
+          persist-credentials: false
+          sparse-checkout: .github/actions
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: neon-test-report
+          path: /tmp/report
+
+      - uses: ./.github/actions/comment
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          marker: ${{ needs.request.outputs.marker }}
+          body-file: /tmp/report/neon-test-report.md

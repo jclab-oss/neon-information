@@ -1,11 +1,17 @@
-# The Neon build tested for compatibility with the latest release archived in testing/archive/upstream/
-# (.github/workflows/compatibility-test.yml, with .github/actions/compatibility-test).
+# The Neon build that pull requests test (.github/workflows/pr.yml): its compatibility with the latest release archived
+# in testing/archive/upstream/ and the workloads (.github/workflows/neon-test.yml). The defaults of the tests requested
+# in issues (.github/workflows/issue.yml) too.
 neon:
   # The tests (test_runner) to run: the source of the images below
   repository: jclab-oss/neon
   ref: release-8480
   # The storage binaries and Postgres installations
   image: ghcr.io/jclab-oss/neon:release-8480
+# The tests to run (`compatibility`, `sqlancer`, `benchbase`)
+tests:
+  - compatibility
+  - sqlancer
+  - benchbase
 # The architectures to test on (`x64`, `arm64`)
 arches:
   - x64

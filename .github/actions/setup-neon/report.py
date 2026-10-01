@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Summarizes a pytest JUnit XML report as Markdown: `report.py <junit.xml> <title>` prints a heading with the outcome
-counts and a table of the test cases (with the failure messages, shortened).
+Summarizes a pytest JUnit XML report as Markdown: `report.py <junit.xml> <title> [<findings>...]` prints a heading with
+the outcome counts, a table of the test cases (with the failure messages, shortened) and the lines of the findings
+files (if they exist) as a list.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import xml.etree.ElementTree as ET
 
 MAX_MESSAGE = 300
 
 
-def main(junit: str, title: str) -> None:
+def main(junit: str, title: str, findings: list[str]) -> None:
     try:
         cases = list(ET.parse(junit).getroot().iter("testcase"))
     except (OSError, ET.ParseError) as e:
@@ -45,6 +47,11 @@ def main(junit: str, title: str) -> None:
     )
     print("\n".join(rows))
 
+    lines = [line for path in findings if os.path.exists(path) for line in open(path).read().splitlines() if line]
+    if lines:
+        print()
+        print("\n".join(f"- {line}" for line in lines))
+
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1], sys.argv[2], sys.argv[3:])

@@ -1,0 +1,46 @@
+name: Neon test
+description: Test a build of jclab-oss/neon (only users with write access to this repository can run it)
+title: "[neon-test] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tests a build of [jclab-oss/neon](https://github.com/jclab-oss/neon) with this repository's tests
+        (compatibility with the latest upstream release, SQLancer and BenchBase workloads), and comments the results.
+        Give **one** of `run`, `pr` or `ref`: the build is the images a Build and Test run pushed (pull requests' and
+        main's runs do). To test again, comment `/neon-test` followed by the same fields as `key: value` lines.
+  - type: input
+    id: run
+    attributes:
+      label: run
+      description: "A Build and Test run of jclab-oss/neon: its ID or URL"
+  - type: input
+    id: pr
+    attributes:
+      label: pr
+      description: "A pull request of jclab-oss/neon (number or URL), for the latest Build and Test run of its head"
+  - type: input
+    id: ref
+    attributes:
+      label: ref
+      description: "A branch, tag or commit of jclab-oss/neon, for the latest Build and Test run of its commit"
+  - type: input
+    id: pg-versions
+    attributes:
+      label: pg-versions
+      description: "The Postgres versions, e.g. `v16, v17` (testing/version.yaml's if empty)"
+  - type: input
+    id: arches
+    attributes:
+      label: arches
+      description: "The architectures: `x64`, `arm64` (testing/version.yaml's if empty)"
+  - type: input
+    id: tests
+    attributes:
+      label: tests
+      description: "The tests: `compatibility`, `sqlancer`, `benchbase` (testing/version.yaml's if empty)"
+  - type: input
+    id: duration
+    attributes:
+      label: duration
+      description: "The duration of each run of a workload, in seconds (30 to 600, 120 if empty)"

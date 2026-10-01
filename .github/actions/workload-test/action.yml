@@ -1,0 +1,112 @@
+name: "Neon workload test"
+description: >
+  Runs a Postgres workload (BenchBase's TPC-C or SQLancer) on a Neon build, given as its published images, checking
+  that branches and tenants don't interfere with each other and that the data survives a crash of the storage (see
+  testing/workload/test_workload.py).
+  Expects this repository checked out at the workspace root. Needs Docker and Python 3 on the runner. Writes a
+  Markdown report (also added to the job summary).
+
+inputs:
+  workload:
+    description: "The workload: `benchbase` or `sqlancer`"
+    required: true
+  neon-image:
+    description: "The neon image (storage binaries and Postgres installations) of the build to test"
+    required: true
+  compute-image:
+    description: "The compute image of the build for `pg-version` (for compute_ctl)"
+    required: true
+  pg-version:
+    description: "The Postgres version to test: `v16`, `v17`"
+    required: true
+  neon-ref:
+    description: "The commit, branch or tag of `neon-repository` the images were built from, whose test fixtures to use"
+    required: true
+  neon-repository:
+    description: "The repository of the test fixtures"
+    default: "jclab-oss/neon"
+  tools-image:
+    description: "The image to run the tests in: build-tools with Java, SQLancer and BenchBase (testing/tools)"
+    required: true
+  duration:
+    description: "The duration of each run of the workload, in seconds"
+    default: "120"
+  title:
+    description: "The heading of the report, `<workload> <pg-version> <arch>` if empty"
+    default: ""
+  fail-on-error:
+    description: "Whether to fail if the test fails (otherwise, see the `outcome` output)"
+    default: "true"
+
+outputs:
+  outcome:
+    description: "`success` if the test passed, `failure` otherwise"
+    value: ${{ steps.test.outputs.outcome || 'failure' }}
+  report:
+    description: "The path of the Markdown report"
+    value: ${{ steps.report.outputs.report }}
+  test-output:
+    description: "The path of an archive (`.tar.gz`) of the test's output (logs, the workloads' outputs)"
+    value: ${{ steps.setup.outputs.dir }}/test_output.tar.gz
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up the build
+      id: setup
+      uses: ./.github/actions/setup-neon
+      with:
+        neon-image: ${{ inputs.neon-image }}
+        compute-image: ${{ inputs.compute-image }}
+        neon-repository: ${{ inputs.neon-repository }}
+        neon-ref: ${{ inputs.neon-ref }}
+
+    - name: Run the workload test
+      id: test
+      shell: bash -euo pipefail {0}
+      env:
+        NEON_TEST_DIR: ${{ steps.setup.outputs.dir }}
+        NEON_TEST_SRC: ${{ steps.setup.outputs.src }}
+        TOOLS_IMAGE: ${{ inputs.tools-image }}
+        PG_VERSION: ${{ inputs.pg-version }}
+        WORKLOAD: ${{ inputs.workload }}
+        WORKLOAD_DURATION: ${{ inputs.duration }}
+      run: |
+        # The scenario uses Neon's test fixtures: it runs from the tests' directory
+        cp -r "${GITHUB_WORKSPACE}/testing/workload" "${NEON_TEST_SRC}/test_runner/neon_information"
+        set +e
+        "${GITHUB_WORKSPACE}/.github/actions/setup-neon/run.sh" "${TOOLS_IMAGE}" '
+            ./scripts/pysync
+            ./scripts/pytest test_runner/neon_information/test_workload.py -p without_testing_feature \
+              -p no:cacheprovider --junitxml=/neon-test/junit.xml --tb=short --verbose -rA
+          ' \
+          --env WORKLOAD --env WORKLOAD_DURATION --env FINDINGS_FILE=/neon-test/findings.txt
+        rc=$?
+        set -e
+        if [ "${rc}" -eq 0 ]; then
+          echo "outcome=success" >> "${GITHUB_OUTPUT}"
+        else
+          echo "outcome=failure" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Write the report
+      id: report
+      if: always() && steps.setup.outputs.dir != ''
+      shell: bash -euo pipefail {0}
+      env:
+        NEON_TEST_DIR: ${{ steps.setup.outputs.dir }}
+        TOOLS_IMAGE: ${{ inputs.tools-image }}
+        TITLE: ${{ inputs.title || format('{0} {1} {2}', inputs.workload, inputs.pg-version, runner.arch) }}
+      run: |
+        "${GITHUB_WORKSPACE}/.github/actions/setup-neon/pack-output.sh" "${TOOLS_IMAGE}"
+        python3 "${GITHUB_WORKSPACE}/.github/actions/setup-neon/report.py" "${NEON_TEST_DIR}/junit.xml" \
+          "Workload: ${TITLE}" "${NEON_TEST_DIR}/findings.txt" > "${NEON_TEST_DIR}/report.md"
+        cat "${NEON_TEST_DIR}/report.md" >> "${GITHUB_STEP_SUMMARY}"
+        echo "report=${NEON_TEST_DIR}/report.md" >> "${GITHUB_OUTPUT}"
+
+    - name: Fail if the test failed
+      if: inputs.fail-on-error == 'true' && steps.test.outputs.outcome != 'success'
+      shell: bash -euo pipefail {0}
+      run: |
+        echo "::error::The workload test failed"
+        exit 1
