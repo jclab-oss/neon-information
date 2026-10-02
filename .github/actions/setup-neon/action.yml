@@ -4,6 +4,7 @@ description: >
   extracts the binaries of the images (and optionally of a previous build's) in the layout of Build and Test's neon
   artifacts, and checks out the tests. Then `run.sh` runs a script in a build-tools-based image with them, and
   `pack-output.sh` archives the tests' output.
+  Also describes the runner in `runner.md` of `dir`.
   The binaries may be built without the `testing` feature: pass `-p without_testing_feature` to pytest (see
   without_testing_feature.py). Needs Docker on the runner.
 
@@ -48,6 +49,8 @@ runs:
       run: |
         rm -rf "${DIR}"
         mkdir -p "${DIR}"
+        # For the reports (`report.py --runner`)
+        "${GITHUB_WORKSPACE}/.github/actions/setup-neon/runner-info.sh" | tee "${DIR}/runner.md"
         {
           echo "dir=${DIR}"
           echo "src=$(pwd)/.neon-test/neon"

@@ -160,7 +160,8 @@ runs:
       run: |
         "${GITHUB_WORKSPACE}/.github/actions/setup-neon/pack-output.sh" "${BUILD_TOOLS_IMAGE}"
         python3 "${GITHUB_WORKSPACE}/.github/actions/setup-neon/report.py" "${NEON_TEST_DIR}/junit.xml" \
-          "Compatibility: ${TITLE} (against ${RELEASE:-?})" > "${NEON_TEST_DIR}/report.md"
+          "Compatibility: ${TITLE} (against ${RELEASE:-?})" --runner "${NEON_TEST_DIR}/runner.md" \
+          > "${NEON_TEST_DIR}/report.md"
         cat "${NEON_TEST_DIR}/report.md" >> "${GITHUB_STEP_SUMMARY}"
         echo "report=${NEON_TEST_DIR}/report.md" >> "${GITHUB_OUTPUT}"
 
