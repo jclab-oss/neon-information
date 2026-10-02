@@ -80,7 +80,8 @@ runs:
             ./scripts/pytest test_runner/neon_information/test_workload.py -p without_testing_feature \
               -p no:cacheprovider --junitxml=/neon-test/junit.xml --tb=short --verbose -rA
           ' \
-          --env WORKLOAD --env WORKLOAD_DURATION --env FINDINGS_FILE=/neon-test/findings.txt
+          --env WORKLOAD --env WORKLOAD_DURATION --env FINDINGS_FILE=/neon-test/findings.txt \
+          --env METRICS_FILE=/neon-test/metrics.jsonl
         rc=$?
         set -e
         if [ "${rc}" -eq 0 ]; then
@@ -100,7 +101,8 @@ runs:
       run: |
         "${GITHUB_WORKSPACE}/.github/actions/setup-neon/pack-output.sh" "${TOOLS_IMAGE}"
         python3 "${GITHUB_WORKSPACE}/.github/actions/setup-neon/report.py" "${NEON_TEST_DIR}/junit.xml" \
-          "Workload: ${TITLE}" "${NEON_TEST_DIR}/findings.txt" > "${NEON_TEST_DIR}/report.md"
+          "Workload: ${TITLE}" "${NEON_TEST_DIR}/findings.txt" --runner "${NEON_TEST_DIR}/runner.md" \
+          --metrics "${NEON_TEST_DIR}/metrics.jsonl" > "${NEON_TEST_DIR}/report.md"
         cat "${NEON_TEST_DIR}/report.md" >> "${GITHUB_STEP_SUMMARY}"
         echo "report=${NEON_TEST_DIR}/report.md" >> "${GITHUB_OUTPUT}"
 

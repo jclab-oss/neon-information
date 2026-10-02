@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -81,6 +82,10 @@ class BenchBase(Workload):
         self.home = Path(os.environ.get("BENCHBASE_HOME", "/opt/benchbase"))
         self.warehouses = int(os.environ.get("BENCHBASE_WAREHOUSES", "1"))
         self.terminals = int(os.environ.get("BENCHBASE_TERMINALS", "2"))
+        # For the report: a JSON line per run (see `metrics`)
+        self.metrics_file = Path(os.environ.get("METRICS_FILE", work_dir / "metrics.jsonl"))
+        self.metrics_file.write_text("")
+        self._metrics_lock = threading.Lock()
 
     def _benchbase(self, target: Target, step: str, seed: int, **steps: bool) -> Problems:
         run_dir = self.work_dir / f"benchbase-{target.label}-{step}"
@@ -97,8 +102,9 @@ class BenchBase(Workload):
             )
         )
         flags = [f"--{k}={str(v).lower()}" for k, v in steps.items()]
+        histograms = run_dir / "results" / "histograms.json"
         cmd = [*java(), "-jar", str(self.home / "benchbase.jar"), "-b", "tpcc", "-c", str(config), *flags,
-               "-d", str(run_dir / "results")]  # fmt: skip
+               "-d", str(run_dir / "results"), "--json-histograms", str(histograms)]  # fmt: skip
         problems = Problems()
         rc = run_logged(cmd, run_dir / "benchbase.log", cwd=self.home, timeout=self.duration + 600)
         if rc != 0:
@@ -114,7 +120,50 @@ class BenchBase(Workload):
                 requests = summary.get("Measured Requests", 0)
                 if not requests:
                     problems.failures.append(f"BenchBase {step} on {target.label} completed no transactions")
+                counts = json.loads(histograms.read_text()) if histograms.exists() else {}
+                line = json.dumps(self.metrics(target, step, summary, counts))
+                with self._metrics_lock, self.metrics_file.open("a") as f:
+                    f.write(line + "\n")
         return problems
+
+    def metrics(self, target: Target, phase: str, summary: dict, histograms: dict) -> dict:
+        """A run's results: its throughput, latencies (ms) and transactions by outcome (BenchBase's histograms)."""
+        seconds = summary.get("Elapsed Time (nanoseconds)", 0) / 1e9
+        latency = summary.get("Latency Distribution", {})
+
+        def transactions(outcome: str) -> dict[str, int]:
+            # {"HISTOGRAM": {"com.oltpbenchmark.benchmarks.tpcc.procedures.NewOrder/01": 1406, ...}, ...}
+            counts = histograms.get(outcome, {}).get("HISTOGRAM", {})
+            return {name.rsplit(".", 1)[-1].split("/")[0]: n for name, n in counts.items()}
+
+        completed = transactions("completed")
+        return {
+            "workload": "tpcc",
+            "phase": phase,
+            "target": target.label,
+            "warehouses": self.warehouses,
+            "terminals": self.terminals,
+            "seconds": round(seconds, 1),
+            "throughput": summary.get("Throughput (requests/second)"),
+            "goodput": summary.get("Goodput (requests/second)"),
+            # TPC-C's tpmC, but without the keying and think times: not comparable to audited results
+            "new_orders_per_minute": completed.get("NewOrder", 0) * 60 / seconds if seconds else None,
+            "latency_ms": {
+                key: latency.get(f"{name} Latency (microseconds)", 0) / 1000
+                for key, name in (
+                    ("avg", "Average"),
+                    ("p50", "Median"),
+                    ("p95", "95th Percentile"),
+                    ("p99", "99th Percentile"),
+                    ("max", "Maximum"),
+                )
+            },
+            "completed": completed,
+            "aborted": transactions("aborted"),
+            "retried": transactions("rejected"),
+            "errors": transactions("unexpected"),
+            "dbms_version": summary.get("DBMS Version"),
+        }
 
     def prepare(self, target: Target):
         target.endpoint.safe_psql(f"CREATE DATABASE {DATABASE}")
