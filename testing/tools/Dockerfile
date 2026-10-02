@@ -15,10 +15,10 @@ ARG SQLANCER_COMMIT=d8e6b158a1a18ab803d1c90bbbc45f58c94c60ba
 RUN git init -q sqlancer && cd sqlancer \
     && git fetch -q --depth 1 https://github.com/sqlancer/sqlancer "${SQLANCER_COMMIT}" && git checkout -q FETCH_HEAD \
     # `--test-tablespaces false` doesn't disable the tablespace tests on Linux, where they're on by default: make them
-    # off unless `--test-tablespaces true`
-    && sed -i 's/return testTablespaces || getDefaultTablespaceSupport();/return testTablespaces;/' \
+    # off unless `--test-tablespaces true` (on Linux)
+    && sed -i 's/return testTablespaces || getDefaultTablespaceSupport();/return testTablespaces \&\& getDefaultTablespaceSupport();/' \
         src/sqlancer/postgres/PostgresOptions.java \
-    && grep -q 'return testTablespaces;' src/sqlancer/postgres/PostgresOptions.java \
+    && grep -q 'return testTablespaces && getDefaultTablespaceSupport();' src/sqlancer/postgres/PostgresOptions.java \
     && mvn -B -q package -DskipTests \
     && mkdir /opt/sqlancer && cp target/sqlancer-*.jar /opt/sqlancer/sqlancer.jar && cp -r target/lib /opt/sqlancer/
 
