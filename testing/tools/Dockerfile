@@ -29,7 +29,8 @@ RUN git init -q benchbase && cd benchbase \
     # It is built with JDK 23 upstream: JDK 25's new warnings would fail it (-Werror), and its formatter plugin
     # doesn't run on JDK 25
     && sed -i '/<arg>-Werror<\/arg>/d' pom.xml \
-    && ./mvnw -B -q package -P postgres -DskipTests -Dfmt.skip=true \
+    # (not ./mvnw, which passes the image's MAVEN_CONFIG to Maven as an argument)
+    && mvn -B -q package -P postgres -DskipTests -Dfmt.skip=true \
     && tar -xzf target/benchbase-postgres.tgz -C /opt && mv /opt/benchbase-postgres /opt/benchbase
 
 FROM eclipse-temurin:25-jre AS jre
