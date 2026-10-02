@@ -1,0 +1,278 @@
+name: Neon test
+
+# Tests a Neon build, given as its published images, with the tests of this repository, all at the same time:
+# - compatibility: Neon's compatibility tests against the latest release of testing/archive/upstream/
+#   (.github/actions/compatibility-test),
+# - sqlancer, benchbase: a workload, checking that branches and tenants don't interfere and that the data survives a
+#   crash of the storage (.github/actions/workload-test).
+# Each runs for every Postgres version and architecture. The results are the `neon-test-report` artifact (Markdown)
+# and the `result` output, for the caller to publish.
+
+on:
+  workflow_call:
+    inputs:
+      neon-repository:
+        description: "The repository of the build's sources (for its tests)"
+        type: string
+        default: jclab-oss/neon
+      neon-ref:
+        description: "The commit the images were built from"
+        type: string
+        required: true
+      neon-image:
+        description: "The neon image of the build"
+        type: string
+        required: true
+      compute-images:
+        description: 'The compute images of the build, as JSON: {"v16": "<image>", "v17": "<image>"}'
+        type: string
+        required: true
+      arches:
+        description: 'The architectures, as JSON: ["x64", "arm64"]'
+        type: string
+        default: '["x64", "arm64"]'
+      tests:
+        description: 'The tests, as JSON: ["compatibility", "sqlancer", "benchbase"]'
+        type: string
+        default: '["compatibility", "sqlancer", "benchbase"]'
+      workload-duration:
+        description: "The duration of each run of a workload, in seconds"
+        type: string
+        default: "120"
+      title:
+        description: "What is tested, for the report"
+        type: string
+        default: ""
+    outputs:
+      result:
+        description: "`success` if all the tests passed, `failure` otherwise"
+        value: ${{ jobs.report.outputs.result }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      compatibility: ${{ steps.plan.outputs.compatibility }}
+      workloads: ${{ steps.plan.outputs.workloads }}
+      tools-arches: ${{ steps.plan.outputs.tools-arches }}
+      tools-image: ${{ steps.plan.outputs.tools-image }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: false
+          persist-credentials: false
+
+      - name: Plan the jobs
+        id: plan
+        env:
+          COMPUTE_IMAGES: ${{ inputs.compute-images }}
+          ARCHES: ${{ inputs.arches }}
+          TESTS: ${{ inputs.tests }}
+        run: |
+          versions=$(jq -c '[to_entries[] | {"pg-version": .key, "compute-image": .value}]' <<< "${COMPUTE_IMAGES}")
+          combinations=$(jq -c --argjson arches "${ARCHES}" '[.[] as $v | $arches[] as $a | $v + {arch: $a}]' <<< "${versions}")
+          {
+            echo "compatibility=$(jq -c --argjson tests "${TESTS}" 'if ($tests | index("compatibility")) then . else [] end' <<< "${combinations}")"
+            workloads=$(jq -c --argjson tests "${TESTS}" '[$tests[] | select(. == "sqlancer" or . == "benchbase")] as $w | [.[] as $c | $w[] | $c + {workload: .}]' <<< "${combinations}")
+            echo "workloads=${workloads}"
+            echo "tools-arches=$(jq -c 'if length > 0 then [.[].arch] | unique else [] end' <<< "${workloads}")"
+            # The tools image is built once for each version of its Dockerfile
+            echo "tools-image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/neon-test-tools:$(git hash-object testing/tools/Dockerfile | cut -c1-16)"
+          } | tee -a "${GITHUB_OUTPUT}"
+
+  tools-image:
+    needs: plan
+    if: needs.plan.outputs.tools-arches != '[]'
+    strategy:
+      matrix:
+        arch: ${{ fromJSON(needs.plan.outputs.tools-arches) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ${{ needs.plan.outputs.tools-image }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: false
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ github.token }}
+        run: echo "${TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build the image, unless it exists
+        run: |
+          if docker manifest inspect "${IMAGE}" > /dev/null 2>&1; then
+            echo "${IMAGE} exists"
+            exit 0
+          fi
+          docker build --tag "${IMAGE}" testing/tools
+          docker push "${IMAGE}"
+
+  compatibility:
+    needs: plan
+    if: needs.plan.outputs.compatibility != '[]'
+    name: compatibility (${{ matrix.pg-version }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.compatibility) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: false
+
+      - name: Run the compatibility tests
+        id: test
+        uses: ./.github/actions/compatibility-test
+        with:
+          neon-image: ${{ inputs.neon-image }}
+          compute-image: ${{ matrix.compute-image }}
+          pg-version: ${{ matrix.pg-version }}
+          neon-repository: ${{ inputs.neon-repository }}
+          neon-ref: ${{ inputs.neon-ref }}
+          title: ${{ matrix.pg-version }} ${{ matrix.arch }}
+          fail-on-error: false
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.test.outputs.report != ''
+        with:
+          name: report-1-compatibility-${{ matrix.pg-version }}-${{ matrix.arch }}
+          path: ${{ steps.test.outputs.report }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.test.outputs.outcome != 'success'
+        with:
+          name: test-output-compatibility-${{ matrix.pg-version }}-${{ matrix.arch }}
+          path: ${{ steps.test.outputs.test-output }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Fail if the tests failed
+        if: steps.test.outputs.outcome != 'success'
+        run: exit 1
+
+  workload:
+    needs: [ plan, tools-image ]
+    if: always() && needs.plan.outputs.workloads != '[]' && needs.tools-image.result == 'success'
+    name: ${{ matrix.workload }} (${{ matrix.pg-version }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.workloads) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: false
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ github.token }}
+        run: echo "${TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      # The images, the binaries and the test's data (WAL, layers, computes) take more than the runners' free disk
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Run the workload test
+        id: test
+        uses: ./.github/actions/workload-test
+        with:
+          workload: ${{ matrix.workload }}
+          neon-image: ${{ inputs.neon-image }}
+          compute-image: ${{ matrix.compute-image }}
+          pg-version: ${{ matrix.pg-version }}
+          neon-repository: ${{ inputs.neon-repository }}
+          neon-ref: ${{ inputs.neon-ref }}
+          tools-image: ${{ needs.plan.outputs.tools-image }}-${{ matrix.arch }}
+          duration: ${{ inputs.workload-duration }}
+          title: ${{ matrix.workload }} ${{ matrix.pg-version }} ${{ matrix.arch }}
+          fail-on-error: false
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.test.outputs.report != ''
+        with:
+          name: report-2-${{ matrix.workload }}-${{ matrix.pg-version }}-${{ matrix.arch }}
+          path: ${{ steps.test.outputs.report }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.test.outputs.outcome != 'success'
+        with:
+          name: test-output-${{ matrix.workload }}-${{ matrix.pg-version }}-${{ matrix.arch }}
+          path: ${{ steps.test.outputs.test-output }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Fail if the test failed
+        if: steps.test.outputs.outcome != 'success'
+        run: exit 1
+
+  report:
+    needs: [ plan, tools-image, compatibility, workload ]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      result: ${{ steps.report.outputs.result }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: report-*
+          path: /tmp/reports
+
+      - name: Write the report
+        id: report
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          NEON_REPOSITORY: ${{ inputs.neon-repository }}
+          NEON_REF: ${{ inputs.neon-ref }}
+          NEON_IMAGE: ${{ inputs.neon-image }}
+          TITLE: ${{ inputs.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Every job that ran must have succeeded (a skipped one was not asked for)
+          failed=$(jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key): \(.value.result)"] | join(", ")' <<< "${RESULTS}")
+          if [ -z "${failed}" ]; then result=success; status="✅ passed"; else result=failure; status="❌ failed (${failed})"; fi
+          {
+            echo "### Neon test: ${status}"
+            echo
+            ref=${NEON_REF}
+            if [[ "${ref}" =~ ^[0-9a-f]{40}$ ]]; then ref=${ref::12}; fi
+            echo "${TITLE:+${TITLE}: }[\`${NEON_REPOSITORY}@${ref}\`](https://github.com/${NEON_REPOSITORY}/commit/${NEON_REF}) (\`${NEON_IMAGE}\`), [run](${RUN_URL})."
+            echo
+            for report in /tmp/reports/*/report.md; do
+              [ -e "${report}" ] || continue
+              cat "${report}"
+              echo
+            done
+          } > /tmp/neon-test-report.md
+          cat /tmp/neon-test-report.md >> "${GITHUB_STEP_SUMMARY}"
+          echo "result=${result}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: neon-test-report
+          path: /tmp/neon-test-report.md

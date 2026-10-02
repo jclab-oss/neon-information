@@ -1,0 +1,38 @@
+name: "Comment"
+description: >
+  Creates a comment on an issue or a pull request of this repository, or updates the bot's previous comment with the
+  same marker.
+
+inputs:
+  issue-number:
+    description: "The issue or pull request"
+    required: true
+  marker:
+    description: "An HTML comment identifying the comment (`<!-- ... -->`)"
+    required: true
+  body-file:
+    description: "The file holding the comment's body (the marker is prepended)"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+      env:
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        MARKER: ${{ inputs.marker }}
+        BODY_FILE: ${{ inputs.body-file }}
+      with:
+        script: |
+          const fs = require('fs');
+          const { ISSUE_NUMBER, MARKER, BODY_FILE } = process.env;
+          const body = `${MARKER}\n${fs.readFileSync(BODY_FILE, 'utf8')}`;
+          const { owner, repo } = context.repo;
+          const issue_number = Number(ISSUE_NUMBER);
+          const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+          const previous = comments.find(c => c.user.type === 'Bot' && c.body.startsWith(MARKER));
+          if (previous) {
+            await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
+          } else {
+            await github.rest.issues.createComment({ owner, repo, issue_number, body });
+          }
