@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 MAX_MESSAGE = 300
 
 
-PHASES = {"p1": "1: main", "p3": "3: main and branch"}
+PHASES = {"p1": "1: main", "p3": "3: all branches"}
 
 
 def read(path: str | None) -> str:
