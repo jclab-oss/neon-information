@@ -83,7 +83,11 @@ runs:
           for bin in neon_local pageserver pagectl safekeeper storage_broker storage_controller storage_scrubber endpoint_storage; do
             docker cp "${id}:/usr/local/bin/${bin}" "$3/bin/"
           done
-          for v in v14 v15 v16 v17; do
+          # The Postgres versions the build has (`docker cp` of a missing one fails)
+          local versions
+          versions=$(docker run --rm --entrypoint ls "$1" /usr/local | grep -E '^v1[0-9]$')
+          echo "Postgres versions: ${versions}"
+          for v in ${versions}; do
             docker cp "${id}:/usr/local/${v}" "$3/pg_install/${v}"
           done
           docker rm "${id}"

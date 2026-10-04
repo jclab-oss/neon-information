@@ -16,7 +16,13 @@ tests:
 arches:
   - x64
   - arm64
-# The Postgres versions to test, with the compute image of each (for compute_ctl)
+# The Postgres versions that requests test when they don't say which: those of them the build has images of
+pg-versions:
+  - v16
+  - v17
+  - v18
+# The Postgres versions that pull requests test (pr.yml), with the compute image of the build above for each (for
+# compute_ctl)
 versions:
   - name: v16
     image: ghcr.io/jclab-oss/compute-node-v16:release-compute-8480
