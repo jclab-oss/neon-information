@@ -10,7 +10,9 @@ The request is `key: value` lines (after `/neon-test`), or the `### key` section
   - `pr`: a pull request of jclab-oss/neon (number or URL), for its head commit's latest such run,
   - `ref`: a branch, tag or commit of jclab-oss/neon, for its commit's latest such run,
   - `neon-ref`, `neon-image` and `compute-<version>` (e.g. `compute-v17`): the commit and the images themselves;
-- `pg-versions`, `arches`, `tests`: lists (`v16, v17`), testing/version.yaml's if missing;
+- `pg-versions`: a list (`v17, v18`), all of which the build must have images of. If missing, those of testing/version.yaml's
+  `pg-versions` the build has images of (for `neon-image`, those of the `compute-<version>` given);
+- `arches`, `tests`: lists (`x64, arm64`), testing/version.yaml's if missing;
 - `duration`: of each run of a workload, in seconds.
 """
 
@@ -28,8 +30,8 @@ IMAGE_OWNER = "ghcr.io/jclab-oss"
 BUILD_AND_TEST = "Build and Test"
 
 KEYS = {"run", "pr", "ref", "neon-ref", "neon-image", "pg-versions", "arches", "tests", "duration"}
-COMPUTE_KEY = re.compile(r"^compute-(v1[4-7])$")
-PG_VERSION = re.compile(r"^v1[4-7]$")
+COMPUTE_KEY = re.compile(r"^compute-(v1[4-8])$")
+PG_VERSION = re.compile(r"^v1[4-8]$")
 ARCHES = {"x64", "arm64"}
 TESTS = {"compatibility", "sqlancer", "benchbase"}
 RUN = re.compile(rf"^(?:https://github\.com/{re.escape(NEON_REPOSITORY)}/actions/runs/)?(\d{{1,20}})(?:/.*)?$")
@@ -117,26 +119,40 @@ def image_exists(image: str) -> bool:
         return False
 
 
-def run_images(run_id: str, pg_versions: list[str]) -> dict[str, str] | None:
-    """The images a Build and Test run pushed (tagged with its ID), if all of them exist."""
-    images = {"neon": f"{IMAGE_OWNER}/neon:{run_id}"}
-    images.update({v: f"{IMAGE_OWNER}/compute-node-{v}:{run_id}" for v in pg_versions})
-    return images if all(image_exists(i) for i in images.values()) else None
+def run_images(run_id: str, pg_versions: list[str], all_versions: bool) -> dict[str, str] | None:
+    """
+    The images a Build and Test run pushed (tagged with its ID): the neon image and the compute images of
+    `pg_versions`, all of them if `all_versions`, otherwise at least one. None if they don't exist.
+    """
+    neon = f"{IMAGE_OWNER}/neon:{run_id}"
+    if not image_exists(neon):
+        return None
+    computes = {v: f"{IMAGE_OWNER}/compute-node-{v}:{run_id}" for v in pg_versions}
+    computes = {v: image for v, image in computes.items() if image_exists(image)}
+    if not computes or (all_versions and len(computes) != len(pg_versions)):
+        return None
+    return {"neon": neon, **computes}
 
 
-def latest_run_of(sha: str, pg_versions: list[str]) -> tuple[dict, dict[str, str]]:
+def images_text(pg_versions: list[str], all_versions: bool) -> str:
+    return f"the neon image and the compute images of {(' and ' if all_versions else ' or ').join(pg_versions)}"
+
+
+def latest_run_of(sha: str, pg_versions: list[str], all_versions: bool) -> tuple[dict, dict[str, str]]:
     runs = github(f"repos/{NEON_REPOSITORY}/actions/runs?head_sha={sha}&per_page=50")["workflow_runs"]
     for run in sorted((r for r in runs if r["name"] == BUILD_AND_TEST), key=lambda r: r["id"], reverse=True):
-        images = run_images(str(run["id"]), pg_versions)
+        images = run_images(str(run["id"]), pg_versions, all_versions)
         if images:
             return run, images
-    raise RequestError(f"no {BUILD_AND_TEST} run of `{sha[:12]}` pushed the images (of {', '.join(pg_versions)})")
+    raise RequestError(
+        f"no {BUILD_AND_TEST} run of `{sha[:12]}` pushed {images_text(pg_versions, all_versions)} (tagged with its ID)"
+    )
 
 
 def resolve(fields: dict[str, str], defaults: dict) -> dict[str, str]:
-    pg_versions = as_list(
-        fields.get("pg-versions"), [v["name"] for v in defaults["versions"]], PG_VERSION, "Postgres version"
-    )
+    # Without `pg-versions`, the default versions the build has images of
+    all_versions = "pg-versions" in fields
+    pg_versions = as_list(fields.get("pg-versions"), defaults["pg-versions"], PG_VERSION, "Postgres version")
     arches = as_list(fields.get("arches"), defaults.get("arches", sorted(ARCHES)), ARCHES, "architecture")
     tests = as_list(fields.get("tests"), defaults.get("tests", sorted(TESTS)), TESTS, "test")
     duration = fields.get("duration", "120")
@@ -154,6 +170,10 @@ def resolve(fields: dict[str, str], defaults: dict) -> dict[str, str]:
         images = {"neon": fields["neon-image"]}
         if not IMAGE.match(images["neon"]):
             raise RequestError("invalid `neon-image` (images of ghcr.io/jclab-oss or ghcr.io/neondatabase)")
+        if not all_versions:
+            pg_versions = sorted(m.group(1) for k in fields if (m := COMPUTE_KEY.match(k)))
+            if not pg_versions:
+                raise RequestError("`neon-image` needs `compute-<version>` (e.g. `compute-v17`)")
         for v in pg_versions:
             if f"compute-{v}" not in fields:
                 raise RequestError(f"`neon-image` needs `compute-{v}`")
@@ -171,10 +191,10 @@ def resolve(fields: dict[str, str], defaults: dict) -> dict[str, str]:
         run = github(f"repos/{NEON_REPOSITORY}/actions/runs/{m.group(1)}")
         if run["name"] != BUILD_AND_TEST:
             raise RequestError(f"run {m.group(1)} is not a {BUILD_AND_TEST} run")
-        images = run_images(m.group(1), pg_versions)
+        images = run_images(m.group(1), pg_versions, all_versions)
         if not images:
             raise RequestError(
-                f"run {m.group(1)} didn't push the images (of {', '.join(pg_versions)}) tagged with its ID"
+                f"run {m.group(1)} didn't push {images_text(pg_versions, all_versions)} (tagged with its ID)"
             )
         neon_ref = run["head_sha"]
         title = f"{BUILD_AND_TEST} [run {run['id']}]({run['html_url']})"
@@ -191,14 +211,14 @@ def resolve(fields: dict[str, str], defaults: dict) -> dict[str, str]:
                 raise RequestError("invalid `ref`")
             sha = github(f"repos/{NEON_REPOSITORY}/commits/{fields['ref']}")["sha"]
             what = f"`{fields['ref']}`"
-        run, images = latest_run_of(sha, pg_versions)
+        run, images = latest_run_of(sha, pg_versions, all_versions)
         neon_ref = sha
         title = f"{what}, {BUILD_AND_TEST} [run {run['id']}]({run['html_url']})"
 
     return {
         "neon-ref": neon_ref,
         "neon-image": images["neon"],
-        "compute-images": json.dumps({v: images[v] for v in pg_versions}),
+        "compute-images": json.dumps({v: images[v] for v in pg_versions if v in images}),
         "arches": json.dumps(arches),
         "tests": json.dumps(tests),
         "duration": duration,

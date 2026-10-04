@@ -5,8 +5,9 @@ name: Neon test
 #   (.github/actions/compatibility-test),
 # - sqlancer, benchbase: a workload, checking that branches and tenants don't interfere and that the data survives a
 #   crash of the storage (.github/actions/workload-test).
-# Each runs for every Postgres version and architecture. The results are the `neon-test-report` artifact (Markdown)
-# and the `result` output, for the caller to publish.
+# Each runs for every Postgres version and architecture; compatibility only for those the archived release has
+# snapshots of. The results are the `neon-test-report` artifact (Markdown) and the `result` output, for the caller to
+# publish.
 
 on:
   workflow_call:
@@ -24,7 +25,7 @@ on:
         type: string
         required: true
       compute-images:
-        description: 'The compute images of the build, as JSON: {"v16": "<image>", "v17": "<image>"}'
+        description: 'The compute images of the build, as JSON: {"v17": "<image>", "v18": "<image>"}'
         type: string
         required: true
       arches:
@@ -61,6 +62,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       compatibility: ${{ steps.plan.outputs.compatibility }}
+      compatibility-skipped: ${{ steps.plan.outputs.compatibility-skipped }}
       workloads: ${{ steps.plan.outputs.workloads }}
       tools-arches: ${{ steps.plan.outputs.tools-arches }}
       tools-image: ${{ steps.plan.outputs.tools-image }}
@@ -79,8 +81,24 @@ jobs:
         run: |
           versions=$(jq -c '[to_entries[] | {"pg-version": .key, "compute-image": .value}]' <<< "${COMPUTE_IMAGES}")
           combinations=$(jq -c --argjson arches "${ARCHES}" '[.[] as $v | $arches[] as $a | $v + {arch: $a}]' <<< "${versions}")
+          # Compatibility, against the latest archived release: only for the versions and architectures it has
+          # snapshots of
+          compatibility=$(jq -c --argjson tests "${TESTS}" 'if ($tests | index("compatibility")) then . else [] end' <<< "${combinations}")
+          release=$(find testing/archive/upstream -mindepth 1 -maxdepth 1 -type d -printf "%f\n" | sort -V | tail -n 1)
+          with_snapshot='[]'
+          skipped='[]'
+          while read -r c; do
+            version=$(jq -r '.["pg-version"]' <<< "${c}")
+            arch=$(jq -r '.arch' <<< "${c}")
+            if [ -e "testing/archive/upstream/${release}/compatibility-snapshot-${arch^^}-release-pg${version}.tar.zst" ]; then
+              with_snapshot=$(jq -c --argjson c "${c}" '. + [$c]' <<< "${with_snapshot}")
+            else
+              skipped=$(jq -c --arg s "${version} ${arch}" '. + [$s]' <<< "${skipped}")
+            fi
+          done < <(jq -c '.[]' <<< "${compatibility}")
           {
-            echo "compatibility=$(jq -c --argjson tests "${TESTS}" 'if ($tests | index("compatibility")) then . else [] end' <<< "${combinations}")"
+            echo "compatibility=${with_snapshot}"
+            echo "compatibility-skipped=$(jq -c --arg r "${release}" '{release: $r, combinations: .}' <<< "${skipped}")"
             workloads=$(jq -c --argjson tests "${TESTS}" '[$tests[] | select(. == "sqlancer" or . == "benchbase")] as $w | [.[] as $c | $w[] | $c + {workload: .}]' <<< "${combinations}")
             echo "workloads=${workloads}"
             echo "tools-arches=$(jq -c 'if length > 0 then [.[].arch] | unique else [] end' <<< "${workloads}")"
@@ -247,6 +265,7 @@ jobs:
         id: report
         env:
           RESULTS: ${{ toJSON(needs) }}
+          COMPATIBILITY_SKIPPED: ${{ needs.plan.outputs.compatibility-skipped }}
           NEON_REPOSITORY: ${{ inputs.neon-repository }}
           NEON_REF: ${{ inputs.neon-ref }}
           NEON_IMAGE: ${{ inputs.neon-image }}
@@ -268,6 +287,7 @@ jobs:
               cat "${report}"
               echo
             done
+            jq -r '.release as $r | .combinations[]? | "#### ⏭️ Compatibility: \(.) (not tested: \($r) has no snapshot of it)\n"' <<< "${COMPATIBILITY_SKIPPED}"
           } > /tmp/neon-test-report.md
           cat /tmp/neon-test-report.md >> "${GITHUB_STEP_SUMMARY}"
           echo "result=${result}" >> "${GITHUB_OUTPUT}"

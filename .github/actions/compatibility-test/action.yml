@@ -15,7 +15,7 @@ inputs:
     description: "The compute image of the build for `pg-version` (for compute_ctl)"
     required: true
   pg-version:
-    description: "The Postgres version to test: `v16`, `v17`"
+    description: "The Postgres version to test: `v14` to `v18` (compatibility: those the archived release has snapshots of)"
     required: true
   neon-ref:
     description: "The commit, branch or tag of `neon-repository` the images were built from, whose tests to run"

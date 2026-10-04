@@ -28,7 +28,7 @@ body:
     id: pg-versions
     attributes:
       label: pg-versions
-      description: "The Postgres versions, e.g. `v16, v17` (testing/version.yaml's if empty)"
+      description: "The Postgres versions, e.g. `v17, v18`. If empty, those of testing/version.yaml's `pg-versions` the build has images of"
   - type: input
     id: arches
     attributes:
